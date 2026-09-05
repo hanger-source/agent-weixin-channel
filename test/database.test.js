@@ -275,3 +275,25 @@ test('batch acknowledgement is all-or-nothing', async () => {
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('acknowledged messages are never replayed to the codex adapter', async () => {
+  const home = isolatedHome()
+  const database = await import(`../src/database.js?test=${Date.now()}-no-replay`)
+  const db = database.openDatabase()
+  try {
+    database.registerAgent(db, {
+      name: '悟空', description: '处理微信请求', adapter: 'codex', adapterTarget: 'thread-id',
+    })
+    database.recordInbound(db, {
+      id: 'm7', accountId: 'bot', userId: 'hang', text: '@悟空 已处理', contextToken: 'ctx',
+    })
+    database.acknowledgeAgentMessage(db, '悟空', 'm7')
+    assert.equal(
+      database.claimNextCodexBatch(db, new Date(Date.now() + 1000).toISOString()),
+      null,
+    )
+  } finally {
+    db.close()
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})

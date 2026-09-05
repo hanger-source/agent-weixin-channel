@@ -114,11 +114,16 @@ export function openDatabase() {
   db.exec(`
     UPDATE agent_inbox
     SET delivery_status = CASE
+      WHEN status = 'acknowledged' THEN 'consumed'
       WHEN status = 'dispatched' OR dispatched_at IS NOT NULL THEN 'dispatched'
       WHEN status = 'dispatch_failed' THEN 'failed'
       ELSE delivery_status
     END
     WHERE delivery_status = 'pending'
+  `)
+  db.exec(`
+    UPDATE agent_inbox SET delivery_status = 'consumed'
+    WHERE status = 'acknowledged' AND delivery_status IN ('pending', 'dispatching')
   `)
   ensureColumn(db, 'outbox', 'agent_id', 'TEXT')
   ensureColumn(db, 'outbox', 'rendered_text', 'TEXT')
@@ -378,7 +383,7 @@ export function claimNextCodexBatch(db, settleBefore, limit = 50) {
       FROM agents a
       JOIN agent_inbox d ON d.agent_id = a.id
       JOIN inbox i ON i.id = d.message_id
-      WHERE a.adapter = 'codex' AND d.delivery_status = 'pending'
+      WHERE a.adapter = 'codex' AND d.status = 'unread' AND d.delivery_status = 'pending'
       GROUP BY a.id
       HAVING MAX(i.received_at) <= ?
       ORDER BY MIN(i.received_at)
@@ -393,7 +398,7 @@ export function claimNextCodexBatch(db, settleBefore, limit = 50) {
              i.message_created_at AS messageCreatedAt, i.received_at AS receivedAt
       FROM agent_inbox d
       JOIN inbox i ON i.id = d.message_id
-      WHERE d.agent_id = ? AND d.delivery_status = 'pending'
+      WHERE d.agent_id = ? AND d.status = 'unread' AND d.delivery_status = 'pending'
       ORDER BY i.received_at
       LIMIT ?
     `).all(agent.id, bounded)
