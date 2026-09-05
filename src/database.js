@@ -68,6 +68,7 @@ export function openDatabase() {
       message_id TEXT NOT NULL,
       agent_id TEXT NOT NULL,
       status TEXT NOT NULL,
+      delivery_status TEXT NOT NULL DEFAULT 'pending',
       claimed_at TEXT,
       dispatched_at TEXT,
       acknowledged_at TEXT,
@@ -109,6 +110,16 @@ export function openDatabase() {
   ensureColumn(db, 'agents', 'description', 'TEXT')
   ensureColumn(db, 'agent_inbox', 'dispatched_at', 'TEXT')
   ensureColumn(db, 'agent_inbox', 'last_error', 'TEXT')
+  ensureColumn(db, 'agent_inbox', 'delivery_status', "TEXT NOT NULL DEFAULT 'pending'")
+  db.exec(`
+    UPDATE agent_inbox
+    SET delivery_status = CASE
+      WHEN status = 'dispatched' OR dispatched_at IS NOT NULL THEN 'dispatched'
+      WHEN status = 'dispatch_failed' THEN 'failed'
+      ELSE delivery_status
+    END
+    WHERE delivery_status = 'pending'
+  `)
   ensureColumn(db, 'outbox', 'agent_id', 'TEXT')
   ensureColumn(db, 'outbox', 'rendered_text', 'TEXT')
   ensureColumn(db, 'outbox', 'media_path', 'TEXT')
@@ -280,7 +291,8 @@ export function listAgentInbox(db, agentName, { limit = 20, status } = {}) {
   const statusClause = status ? 'AND d.status = ?' : ''
   const args = status ? [agent.id, status, bounded] : [agent.id, bounded]
   return db.prepare(`
-    SELECT i.id, a.display_name AS agentName, d.status, i.user_id AS userId,
+    SELECT i.id, a.display_name AS agentName, d.status,
+           d.delivery_status AS deliveryStatus, i.user_id AS userId,
            i.text, i.media_json AS mediaJson, i.message_created_at AS messageCreatedAt,
            i.received_at AS receivedAt, d.claimed_at AS claimedAt,
            d.dispatched_at AS dispatchedAt, d.acknowledged_at AS acknowledgedAt,
@@ -330,7 +342,8 @@ export function acknowledgeAgentMessage(db, agentName, messageId) {
 
 export function markAgentMessageDispatched(db, agentId, messageId) {
   const changed = db.prepare(`
-    UPDATE agent_inbox SET status = 'dispatched', dispatched_at = ?, last_error = NULL
+    UPDATE agent_inbox
+    SET delivery_status = 'dispatched', dispatched_at = ?, last_error = NULL
     WHERE message_id = ? AND agent_id = ? AND status = 'unread'
   `).run(now(), messageId, agentId)
   if (changed.changes !== 1) throw new Error(`消息 ${messageId} 无法标记为已触发`)
@@ -338,7 +351,7 @@ export function markAgentMessageDispatched(db, agentId, messageId) {
 
 export function markAgentMessageDispatchFailed(db, agentId, messageId, error) {
   const changed = db.prepare(`
-    UPDATE agent_inbox SET status = 'dispatch_failed', last_error = ?
+    UPDATE agent_inbox SET delivery_status = 'failed', last_error = ?
     WHERE message_id = ? AND agent_id = ? AND status = 'unread'
   `).run(String(error).slice(0, 2000), messageId, agentId)
   if (changed.changes !== 1) throw new Error(`消息 ${messageId} 无法标记为触发失败`)
@@ -353,28 +366,72 @@ export function enqueueMessage(db, { recipientAlias, agentName, text, mediaPath,
     throw new Error(`收件人 ${recipientAlias} 尚未建立可发送会话；请先从微信给机器人发一条消息`)
   }
   if (!text && !mediaPath) throw new Error('消息正文和媒体文件不能同时为空')
-  if (dedupeKey) {
-    const existing = db.prepare(`
-      SELECT id, status FROM outbox WHERE dedupe_key = ?
-    `).get(dedupeKey)
-    if (existing) return { id: existing.id, status: existing.status, deduplicated: true }
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    if (dedupeKey) {
+      const existing = db.prepare(`
+        SELECT id, status FROM outbox WHERE dedupe_key = ?
+      `).get(dedupeKey)
+      if (existing) {
+        db.exec('COMMIT')
+        return { id: existing.id, status: existing.status, deduplicated: true }
+      }
+    }
+
+    const pending = db.prepare(`
+      SELECT i.id, a.display_name AS agentName, d.status,
+             d.delivery_status AS deliveryStatus, i.user_id AS userId,
+             i.text, i.media_json AS mediaJson, i.message_created_at AS messageCreatedAt,
+             i.received_at AS receivedAt, d.claimed_at AS claimedAt,
+             d.dispatched_at AS dispatchedAt, d.acknowledged_at AS acknowledgedAt,
+             d.last_error AS lastError
+      FROM agent_inbox d
+      JOIN inbox i ON i.id = d.message_id
+      JOIN agents a ON a.id = d.agent_id
+      WHERE d.agent_id = ? AND d.status IN ('unread', 'claimed')
+      ORDER BY i.received_at
+    `).all(agent.id)
+    if (pending.length) {
+      const claimedAt = now()
+      db.prepare(`
+        UPDATE agent_inbox SET status = 'claimed', claimed_at = COALESCE(claimed_at, ?)
+        WHERE agent_id = ? AND status = 'unread'
+      `).run(claimedAt, agent.id)
+      db.exec('COMMIT')
+      return {
+        status: 'inbox_pending',
+        blocked: true,
+        deduplicated: false,
+        inbox: pending.map(({ mediaJson, ...message }) => ({
+          ...message,
+          status: 'claimed',
+          claimedAt: message.claimedAt || claimedAt,
+          media: JSON.parse(mediaJson || '[]'),
+        })),
+      }
+    }
+
+    const id = crypto.randomUUID()
+    const timestamp = now()
+    const renderedText = `【${agent.name}】\n${agent.description}\n${text || ''}`
+    if ([...renderedText].length > 1500) {
+      throw new Error('名称、任务描述和正文合计超过 1500 个字符；请拆成有独立含义的多条通知')
+    }
+    db.prepare(`
+      INSERT INTO outbox(
+        id, recipient_alias, user_id, text, source, dedupe_key, agent_id, rendered_text, media_path,
+        status, attempts, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)
+    `).run(
+      id, recipient.alias, recipient.userId, text || '', null, dedupeKey || null,
+      agent.id, renderedText, mediaPath || null, timestamp, timestamp,
+    )
+    db.exec('COMMIT')
+    return { id, status: 'queued', deduplicated: false }
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
   }
-  const id = crypto.randomUUID()
-  const timestamp = now()
-  const renderedText = `【${agent.name}】\n${agent.description}\n${text || ''}`
-  if ([...renderedText].length > 1500) {
-    throw new Error('名称、任务描述和正文合计超过 1500 个字符；请拆成有独立含义的多条通知')
-  }
-  db.prepare(`
-    INSERT INTO outbox(
-      id, recipient_alias, user_id, text, source, dedupe_key, agent_id, rendered_text, media_path,
-      status, attempts, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)
-  `).run(
-    id, recipient.alias, recipient.userId, text || '', null, dedupeKey || null,
-    agent.id, renderedText, mediaPath || null, timestamp, timestamp,
-  )
-  return { id, status: 'queued', deduplicated: false }
 }
 
 export function resetInterruptedMessages(db) {

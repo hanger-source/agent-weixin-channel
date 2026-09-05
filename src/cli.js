@@ -213,7 +213,10 @@ program.command('send')
         mediaPath,
         dedupeKey: opts.dedupeKey,
       })
-      output(result, `${result.status}: ${result.id}${result.deduplicated ? ' (deduplicated)' : ''}`)
+      const human = result.blocked
+        ? `inbox_pending: 发现 ${result.inbox.length} 条未确认消息；本次出站未入队`
+        : `${result.status}: ${result.id}${result.deduplicated ? ' (deduplicated)' : ''}`
+      output(result, human)
     } finally { db.close() }
   }))
 

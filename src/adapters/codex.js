@@ -8,7 +8,7 @@ export function codexInboundPrompt({ agentName, messageId, text, media }) {
     `$agent-weixin-channel Hang 通过微信向 @${agentName} 发送了一条消息。`,
     `通道消息 ID：${messageId}`,
     `消息正文：${text || '（无文本）'}${mediaSummary}`,
-    `请把它作为 Hang 的正常用户输入处理。需要微信回复时，使用 agent-weixin-channel send --from ${agentName}；不要只在 Codex 界面回复。`,
+    `请把它作为 Hang 的正常用户输入处理。处理后先用 agent-weixin-channel inbox ack ${messageId} --agent ${agentName} 确认，再使用 send --from ${agentName} 微信回复；send 会在入队前返回其余未确认消息，避免发出过时回复。`,
   ].join('\n')
 }
 

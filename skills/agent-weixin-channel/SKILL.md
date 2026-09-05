@@ -52,6 +52,8 @@ agent-weixin-channel --json send --to hang --from 悟空 --file /absolute/path/r
 agent-weixin-channel --json send --to hang --from 悟空 --dedupe-key "release-2026-09-05" --message "发布已经完成"
 ```
 
+`send` 本身是收发同步边界：真正写入 outbox 前，会原子检查当前 Agent 的所有未确认 inbox。若返回 `status=inbox_pending`，本次消息没有入队；先把 `inbox` 数组作为 Hang 的新输入处理，逐条执行 `inbox ack <message-id> --agent 悟空`，再沿用相同 `--dedupe-key` 重试。不要用旧上下文继续发送，也不需要为此安装全局 hook。
+
 `queued` 只表示写入本机 durable outbox；`accepted` 表示微信 API 接受请求，不等同于客户端已读或可见。需要核查时：
 
 ```bash
@@ -59,7 +61,7 @@ agent-weixin-channel --json messages get <message-id>
 agent-weixin-channel --json messages list --limit 20
 ```
 
-如果已明确等待 Hang 回复，让 Hang 发送 `@悟空 回复内容`。只读取本 Agent 的 inbox，并在处理完成后确认：
+如果已明确等待 Hang 回复，让 Hang 发送 `@悟空 回复内容`。只读取本 Agent 的 inbox，并在处理完成后确认。由 Codex adapter 触发的消息也必须在处理后确认；宿主已接收不等于 Agent 已读：
 
 ```bash
 agent-weixin-channel --json inbox claim --agent 悟空

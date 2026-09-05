@@ -172,7 +172,45 @@ test('host adapter delivery has an explicit dispatched state', async () => {
       id: 'm2', accountId: 'bot', userId: 'hang', text: '@悟空 继续处理', contextToken: 'ctx',
     })
     database.markAgentMessageDispatched(db, agent.id, 'm2')
-    assert.equal(database.listAgentInbox(db, '悟空', { status: 'dispatched' })[0].text, '继续处理')
+    const [message] = database.listAgentInbox(db, '悟空', { status: 'unread' })
+    assert.equal(message.text, '继续处理')
+    assert.equal(message.deliveryStatus, 'dispatched')
+  } finally {
+    db.close()
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('outbound send atomically yields pending inbox before enqueueing', async () => {
+  const home = isolatedHome()
+  const database = await import(`../src/database.js?test=${Date.now()}-send-barrier`)
+  const db = database.openDatabase()
+  try {
+    database.upsertRecipient(db, {
+      alias: 'hang', userId: 'wx-user', accountId: 'bot', contextToken: 'ctx',
+    })
+    const agent = database.registerAgent(db, {
+      name: '悟空', description: '处理微信请求', adapter: 'codex', adapterTarget: 'thread-id',
+    })
+    database.recordInbound(db, {
+      id: 'm3', accountId: 'bot', userId: 'hang', text: '@悟空 先看这条', contextToken: 'ctx',
+    })
+    database.markAgentMessageDispatched(db, agent.id, 'm3')
+
+    const blocked = database.enqueueMessage(db, {
+      recipientAlias: 'hang', agentName: '悟空', text: '旧回复', dedupeKey: 'reply-m3',
+    })
+    assert.equal(blocked.status, 'inbox_pending')
+    assert.equal(blocked.blocked, true)
+    assert.equal(blocked.inbox[0].text, '先看这条')
+    assert.equal(database.listMessages(db).length, 0)
+
+    database.acknowledgeAgentMessage(db, '悟空', 'm3')
+    const queued = database.enqueueMessage(db, {
+      recipientAlias: 'hang', agentName: '悟空', text: '新回复', dedupeKey: 'reply-m3',
+    })
+    assert.equal(queued.status, 'queued')
+    assert.equal(database.listMessages(db).length, 1)
   } finally {
     db.close()
     fs.rmSync(home, { recursive: true, force: true })

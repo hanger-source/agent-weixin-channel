@@ -38,7 +38,7 @@ agent-weixin-channel --json inbox claim --agent 悟空
 agent-weixin-channel daemon status
 ```
 
-`send` 支持文本、图片、视频和普通文件，也支持 `--message-file`、`--stdin`、`--dedupe-key` 和 `--dry-run`。入站图片、视频、文件和语音会通过 SDK 的 CDN 下载、AES 解密和媒体存储链落到本机；语音会尽可能转为 WAV。Codex binding 会把图片作为 image input，把其他媒体的绝对路径写入触发消息。
+`send` 支持文本、图片、视频和普通文件，也支持 `--message-file`、`--stdin`、`--dedupe-key` 和 `--dry-run`。实际写入 outbox 前，它会在同一个 SQLite 事务中检查当前 Agent 的未确认 inbox；若有新消息，则返回 `inbox_pending` 和消息内容，本次出站不会入队。Agent 处理并 `inbox ack` 后再重试发送，因此不会带着旧上下文回复。入站图片、视频、文件和语音会通过 SDK 的 CDN 下载、AES 解密和媒体存储链落到本机；语音会尽可能转为 WAV。Codex binding 会把图片作为 image input，把其他媒体的绝对路径写入触发消息。
 
 ## Agent 路由
 
@@ -68,7 +68,7 @@ Hang 回复时使用：
 @悟空 可以发布
 ```
 
-该消息只进入“悟空”的 inbox。不带路由或指向未知名称的消息会保留在通道记录中，但不会猜测投递对象。`inbox claim` 以原子方式领取一条消息，处理完后用 `inbox ack` 确认。
+该消息只进入“悟空”的 inbox。不带路由或指向未知名称的消息会保留在通道记录中，但不会猜测投递对象。`inbox claim` 以原子方式领取一条消息，处理完后用 `inbox ack` 确认。宿主投递与 Agent 阅读是两个状态：消息即使已经排给 Codex，在 Agent 确认前仍属于未读；`send` 会把未读消息作为出站同步屏障返回。
 
 `doctor.data.ready=true` 要求 daemon 已 ready、最近一次长轮询健康，并且至少有一个收件人取得了 `context_token`；进程存活本身不等于微信通道可用。
 
@@ -95,6 +95,8 @@ Hang 回复时使用：
 - `retrying`：瞬态失败，按退避时间重试。
 - `accepted`：微信 API 接受请求，不代表对方已读或客户端一定可见。
 - `failed`：不可重试或达到五次尝试上限。
+
+当 `send` 返回 `inbox_pending` 时，消息尚未进入 outbox；先处理并确认返回的 inbox，再使用相同 `--dedupe-key` 重试。
 
 ## 状态所有权
 
