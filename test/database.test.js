@@ -217,3 +217,61 @@ test('outbound send atomically yields pending inbox before enqueueing', async ()
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('codex adapter claims and acknowledges consecutive messages as one batch', async () => {
+  const home = isolatedHome()
+  const database = await import(`../src/database.js?test=${Date.now()}-codex-batch`)
+  const db = database.openDatabase()
+  try {
+    database.registerAgent(db, {
+      name: '悟空', description: '处理微信请求', adapter: 'codex', adapterTarget: 'thread-id',
+    })
+    for (const [id, text] of [['m4', '第一条'], ['m5', '第二条']]) {
+      database.recordInbound(db, {
+        id, accountId: 'bot', userId: 'hang', text: `@悟空 ${text}`, contextToken: 'ctx',
+      })
+    }
+
+    const batch = database.claimNextCodexBatch(db, new Date(Date.now() + 1000).toISOString())
+    assert.equal(batch.agentName, '悟空')
+    assert.equal(batch.threadId, 'thread-id')
+    assert.deepEqual(batch.messages.map(({ id, text }) => ({ id, text })), [
+      { id: 'm4', text: '第一条' },
+      { id: 'm5', text: '第二条' },
+    ])
+    database.markAgentMessagesDispatched(db, batch.id, ['m4', 'm5'])
+    assert.deepEqual(
+      database.listAgentInbox(db, '悟空').map(({ status, deliveryStatus }) => ({ status, deliveryStatus })),
+      [
+        { status: 'unread', deliveryStatus: 'dispatched' },
+        { status: 'unread', deliveryStatus: 'dispatched' },
+      ],
+    )
+    assert.deepEqual(database.acknowledgeAgentMessages(db, '悟空', ['m4', 'm5']), {
+      ids: ['m4', 'm5'], agentName: '悟空', status: 'acknowledged', count: 2,
+    })
+  } finally {
+    db.close()
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('batch acknowledgement is all-or-nothing', async () => {
+  const home = isolatedHome()
+  const database = await import(`../src/database.js?test=${Date.now()}-ack-batch`)
+  const db = database.openDatabase()
+  try {
+    database.registerAgent(db, { name: '悟空', description: '处理微信请求' })
+    database.recordInbound(db, {
+      id: 'm6', accountId: 'bot', userId: 'hang', text: '@悟空 保留未读', contextToken: 'ctx',
+    })
+    assert.throws(
+      () => database.acknowledgeAgentMessages(db, '悟空', ['m6', 'missing']),
+      /本次未确认任何消息/,
+    )
+    assert.equal(database.listAgentInbox(db, '悟空')[0].status, 'unread')
+  } finally {
+    db.close()
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})

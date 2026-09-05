@@ -35,6 +35,7 @@ agent-weixin-channel --json send --to hang --from 悟空 --message "任务已经
 agent-weixin-channel --json send --to hang --from 悟空 --file /absolute/path/report.pdf --caption "验收报告"
 agent-weixin-channel --json messages get <message-id>
 agent-weixin-channel --json inbox claim --agent 悟空
+agent-weixin-channel --json inbox ack <message-id-1> <message-id-2> --agent 悟空
 agent-weixin-channel daemon status
 ```
 
@@ -52,7 +53,7 @@ agent-weixin-channel daemon status
 任务已经完成
 ```
 
-Codex task 可以在注册时绑定自己的 thread。微信消息到达后，daemon 会调用本机 Codex App Server 的队列入口，立即把消息作为下一条用户输入送入该 task：
+Codex task 可以在注册时绑定自己的 thread。微信消息到达后，daemon 会等待 1.5 秒连续输入窗口；同一 Agent 在窗口内收到的消息会按原顺序合并为一个批次，再调用本机 Codex App Server 的队列入口送入该 task：
 
 ```bash
 agent-weixin-channel --json agents register 悟空 \
@@ -68,7 +69,7 @@ Hang 回复时使用：
 @悟空 可以发布
 ```
 
-该消息只进入“悟空”的 inbox。不带路由或指向未知名称的消息会保留在通道记录中，但不会猜测投递对象。`inbox claim` 以原子方式领取一条消息，处理完后用 `inbox ack` 确认。宿主投递与 Agent 阅读是两个状态：消息即使已经排给 Codex，在 Agent 确认前仍属于未读；`send` 会把未读消息作为出站同步屏障返回。
+该消息只进入“悟空”的 inbox。不带路由或指向未知名称的消息会保留在通道记录中，但不会猜测投递对象。`inbox claim` 以原子方式领取一条消息；`inbox ack` 接受一个或多个消息 ID，以一次全成或全不成的事务确认整批。宿主投递与 Agent 阅读是两个状态：消息即使已经排给 Codex，在 Agent 确认前仍属于未读；`send` 会把所有未确认消息一起作为出站同步屏障返回。
 
 `doctor.data.ready=true` 要求 daemon 已 ready、最近一次长轮询健康，并且至少有一个收件人取得了 `context_token`；进程存活本身不等于微信通道可用。
 

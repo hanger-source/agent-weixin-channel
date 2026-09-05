@@ -2,17 +2,18 @@ import fs from 'node:fs'
 import { spawn } from 'node:child_process'
 
 import {
+  claimNextCodexBatch,
   claimNextMessage,
-  getAgentById,
   getMeta,
-  markAgentMessageDispatched,
-  markAgentMessageDispatchFailed,
+  markAgentMessagesDispatched,
+  markAgentMessagesDispatchFailed,
   markAccepted,
   markFailed,
   markRetrying,
   observeRecipient,
   openDatabase,
   recordInbound,
+  resetInterruptedAgentDeliveries,
   resetInterruptedMessages,
   setMeta,
 } from './database.js'
@@ -21,6 +22,7 @@ import { ensureStateHome, statePaths } from './paths.js'
 import { downloadInboundMedia, extractText, loadProvider } from './provider.js'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const CODEX_BATCH_SETTLE_MS = 1500
 
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false
@@ -177,7 +179,7 @@ async function pollingLoop({ db, account, provider, signal }) {
         const messageId = String(message.message_id || message.client_id || `${Date.now()}-${Math.random()}`)
         const text = extractText(message)
         const media = await downloadInboundMedia(message, provider, account)
-        const delivery = recordInbound(db, {
+        recordInbound(db, {
           id: messageId,
           accountId: account.accountId,
           userId,
@@ -186,24 +188,6 @@ async function pollingLoop({ db, account, provider, signal }) {
           contextToken,
           messageCreatedAt: message.create_time_ms ? new Date(message.create_time_ms).toISOString() : null,
         })
-        if (delivery.routed) {
-          const agent = getAgentById(db, delivery.agentId)
-          if (agent?.adapter === 'codex') {
-            try {
-              await dispatchToCodex({
-                threadId: agent.adapterTarget,
-                agentName: agent.name,
-                messageId,
-                text: delivery.body,
-                media,
-              })
-              markAgentMessageDispatched(db, agent.id, messageId)
-            } catch (error) {
-              markAgentMessageDispatchFailed(db, agent.id, messageId, error)
-              console.error(new Date().toISOString(), `codex dispatch failed agent=${agent.name}:`, String(error))
-            }
-          }
-        }
       }
     } catch (error) {
       if (signal.aborted) break
@@ -218,6 +202,29 @@ async function pollingLoop({ db, account, provider, signal }) {
   }
 }
 
+async function codexDispatchLoop({ db, signal }) {
+  while (!signal.aborted) {
+    const settleBefore = new Date(Date.now() - CODEX_BATCH_SETTLE_MS).toISOString()
+    const batch = claimNextCodexBatch(db, settleBefore)
+    if (!batch) {
+      await sleep(200)
+      continue
+    }
+    const ids = batch.messages.map((message) => message.id)
+    try {
+      await dispatchToCodex({
+        threadId: batch.threadId,
+        agentName: batch.agentName,
+        messages: batch.messages,
+      })
+      markAgentMessagesDispatched(db, batch.id, ids)
+    } catch (error) {
+      markAgentMessagesDispatchFailed(db, batch.id, ids, error)
+      console.error(new Date().toISOString(), `codex batch dispatch failed agent=${batch.agentName}:`, String(error))
+    }
+  }
+}
+
 export async function runDaemon() {
   const releasePid = acquirePidFile()
   let db
@@ -228,6 +235,7 @@ export async function runDaemon() {
   try {
     db = openDatabase()
     resetInterruptedMessages(db)
+    resetInterruptedAgentDeliveries(db)
     provider = await loadProvider()
     const accountId = getMeta(db, 'account_id')
     if (!accountId) throw new Error('尚未登录；先运行 agent-weixin-channel login')
@@ -253,6 +261,7 @@ export async function runDaemon() {
     await Promise.all([
       pollingLoop({ db, account, provider, signal: controller.signal }),
       dispatchLoop({ db, account, provider, signal: controller.signal }),
+      codexDispatchLoop({ db, signal: controller.signal }),
     ])
     await provider.api.notifyStop({ baseUrl: account.baseUrl, token: account.token }).catch(() => {})
   } finally {

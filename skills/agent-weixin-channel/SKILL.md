@@ -52,7 +52,7 @@ agent-weixin-channel --json send --to hang --from 悟空 --file /absolute/path/r
 agent-weixin-channel --json send --to hang --from 悟空 --dedupe-key "release-2026-09-05" --message "发布已经完成"
 ```
 
-`send` 本身是收发同步边界：真正写入 outbox 前，会原子检查当前 Agent 的所有未确认 inbox。若返回 `status=inbox_pending`，本次消息没有入队；先把 `inbox` 数组作为 Hang 的新输入处理，逐条执行 `inbox ack <message-id> --agent 悟空`，再沿用相同 `--dedupe-key` 重试。不要用旧上下文继续发送，也不需要为此安装全局 hook。
+`send` 本身是收发同步边界：真正写入 outbox 前，会原子检查当前 Agent 的所有未确认 inbox。若返回 `status=inbox_pending`，本次消息没有入队；先按 `inbox` 数组顺序把整批作为 Hang 的连续输入处理，再执行一次 `inbox ack <message-id-1> <message-id-2> --agent 悟空` 确认整批，最后沿用相同 `--dedupe-key` 重试。不要用旧上下文继续发送，也不需要为此安装全局 hook。
 
 `queued` 只表示写入本机 durable outbox；`accepted` 表示微信 API 接受请求，不等同于客户端已读或可见。需要核查时：
 
@@ -65,8 +65,10 @@ agent-weixin-channel --json messages list --limit 20
 
 ```bash
 agent-weixin-channel --json inbox claim --agent 悟空
-agent-weixin-channel --json inbox ack <message-id> --agent 悟空
+agent-weixin-channel --json inbox ack <message-id-1> <message-id-2> --agent 悟空
 ```
+
+Codex binding 会把同一 Agent 在 1.5 秒连续输入窗口内收到的多条微信消息按顺序合并为一次 task 输入，不为每条消息分别启动一次 queue。回复前的 `send` 屏障同样一次返回全部未确认消息。
 
 不带 `@两字名称` 或指向未知名称的消息不会自动投递给任何 Agent，避免“最近活跃 Agent”之类的隐式串线。
 

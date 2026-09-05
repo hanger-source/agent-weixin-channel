@@ -330,15 +330,110 @@ export function claimAgentMessage(db, agentName) {
 }
 
 export function acknowledgeAgentMessage(db, agentName, messageId) {
+  const result = acknowledgeAgentMessages(db, agentName, [messageId])
+  return { id: result.ids[0], agentName, status: result.status }
+}
+
+export function acknowledgeAgentMessages(db, agentName, messageIds) {
   const agent = getAgent(db, agentName)
   if (!agent) throw new Error(`未知 Agent“${agentName}”`)
+  const ids = [...new Set(messageIds.map(String))]
+  if (!ids.length) throw new Error('至少提供一个消息 ID')
+  const placeholders = ids.map(() => '?').join(', ')
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const matched = db.prepare(`
+      SELECT COUNT(*) AS count FROM agent_inbox
+      WHERE agent_id = ? AND message_id IN (${placeholders})
+        AND status IN ('unread', 'claimed', 'dispatched', 'dispatch_failed')
+    `).get(agent.id, ...ids)
+    if (matched.count !== ids.length) {
+      throw new Error(`部分消息不属于“${agentName}”的未确认 inbox；本次未确认任何消息`)
+    }
+    db.prepare(`
+      UPDATE agent_inbox SET status = 'acknowledged', acknowledged_at = ?
+      WHERE agent_id = ? AND message_id IN (${placeholders})
+    `).run(now(), agent.id, ...ids)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+  return { ids, agentName, status: 'acknowledged', count: ids.length }
+}
+
+export function resetInterruptedAgentDeliveries(db) {
+  db.prepare(`
+    UPDATE agent_inbox SET delivery_status = 'pending', last_error = 'daemon restarted during dispatch'
+    WHERE delivery_status = 'dispatching'
+  `).run()
+}
+
+export function claimNextCodexBatch(db, settleBefore, limit = 50) {
+  const bounded = Math.max(1, Math.min(200, Number(limit) || 50))
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const agent = db.prepare(`
+      SELECT a.id, a.display_name AS agentName, a.adapter_target AS threadId
+      FROM agents a
+      JOIN agent_inbox d ON d.agent_id = a.id
+      JOIN inbox i ON i.id = d.message_id
+      WHERE a.adapter = 'codex' AND d.delivery_status = 'pending'
+      GROUP BY a.id
+      HAVING MAX(i.received_at) <= ?
+      ORDER BY MIN(i.received_at)
+      LIMIT 1
+    `).get(settleBefore)
+    if (!agent) {
+      db.exec('COMMIT')
+      return null
+    }
+    const rows = db.prepare(`
+      SELECT i.id, i.text, i.media_json AS mediaJson,
+             i.message_created_at AS messageCreatedAt, i.received_at AS receivedAt
+      FROM agent_inbox d
+      JOIN inbox i ON i.id = d.message_id
+      WHERE d.agent_id = ? AND d.delivery_status = 'pending'
+      ORDER BY i.received_at
+      LIMIT ?
+    `).all(agent.id, bounded)
+    const ids = rows.map((row) => row.id)
+    const placeholders = ids.map(() => '?').join(', ')
+    db.prepare(`
+      UPDATE agent_inbox SET delivery_status = 'dispatching', last_error = NULL
+      WHERE agent_id = ? AND message_id IN (${placeholders}) AND delivery_status = 'pending'
+    `).run(agent.id, ...ids)
+    db.exec('COMMIT')
+    return {
+      ...agent,
+      messages: rows.map(({ mediaJson, ...row }) => ({
+        ...row,
+        media: JSON.parse(mediaJson || '[]'),
+      })),
+    }
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+export function markAgentMessagesDispatched(db, agentId, messageIds) {
+  const placeholders = messageIds.map(() => '?').join(', ')
   const changed = db.prepare(`
-    UPDATE agent_inbox SET status = 'acknowledged', acknowledged_at = ?
-    WHERE message_id = ? AND agent_id = ?
-      AND status IN ('unread', 'claimed', 'dispatched', 'dispatch_failed')
-  `).run(now(), messageId, agent.id)
-  if (changed.changes !== 1) throw new Error(`消息 ${messageId} 不属于“${agentName}”的未确认 inbox`)
-  return { id: messageId, agentName, status: 'acknowledged' }
+    UPDATE agent_inbox
+    SET delivery_status = 'dispatched', dispatched_at = ?, last_error = NULL
+    WHERE agent_id = ? AND message_id IN (${placeholders}) AND delivery_status = 'dispatching'
+  `).run(now(), agentId, ...messageIds)
+  if (changed.changes !== messageIds.length) throw new Error('Codex 批次投递状态发生并发变化')
+}
+
+export function markAgentMessagesDispatchFailed(db, agentId, messageIds, error) {
+  const placeholders = messageIds.map(() => '?').join(', ')
+  const changed = db.prepare(`
+    UPDATE agent_inbox SET delivery_status = 'failed', last_error = ?
+    WHERE agent_id = ? AND message_id IN (${placeholders}) AND delivery_status = 'dispatching'
+  `).run(String(error).slice(0, 2000), agentId, ...messageIds)
+  if (changed.changes !== messageIds.length) throw new Error('Codex 批次失败状态发生并发变化')
 }
 
 export function markAgentMessageDispatched(db, agentId, messageId) {

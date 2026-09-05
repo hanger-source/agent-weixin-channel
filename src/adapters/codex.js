@@ -1,22 +1,26 @@
 import { spawn } from 'node:child_process'
 
-export function codexInboundPrompt({ agentName, messageId, text, media }) {
-  const mediaSummary = media?.length
-    ? `\n附件：${media.map((item) => `${item.kind}${item.localPath ? `=${item.localPath}` : ''}`).join('；')}`
-    : ''
+export function codexInboundPrompt({ agentName, messages }) {
+  const entries = messages.map((message, index) => {
+    const mediaSummary = message.media?.length
+      ? `\n附件：${message.media.map((item) => `${item.kind}${item.localPath ? `=${item.localPath}` : ''}`).join('；')}`
+      : ''
+    return `${index + 1}. 通道消息 ID：${message.id}\n消息正文：${message.text || '（无文本）'}${mediaSummary}`
+  })
+  const ids = messages.map((message) => message.id)
   return [
-    `$agent-weixin-channel Hang 通过微信向 @${agentName} 发送了一条消息。`,
-    `通道消息 ID：${messageId}`,
-    `消息正文：${text || '（无文本）'}${mediaSummary}`,
-    `请把它作为 Hang 的正常用户输入处理。处理后先用 agent-weixin-channel inbox ack ${messageId} --agent ${agentName} 确认，再使用 send --from ${agentName} 微信回复；send 会在入队前返回其余未确认消息，避免发出过时回复。`,
+    `$agent-weixin-channel Hang 通过微信向 @${agentName} 连续发送了 ${messages.length} 条消息。`,
+    ...entries,
+    `请按顺序把它们作为 Hang 的同一批正常用户输入处理。处理后使用 agent-weixin-channel inbox ack ${ids.join(' ')} --agent ${agentName} 一次确认整批，再使用 send --from ${agentName} 微信回复；send 会在入队前返回其余未确认消息。`,
   ].join('\n')
 }
 
-export function dispatchToCodex({ threadId, agentName, messageId, text, media }) {
+export function dispatchToCodex({ threadId, agentName, messages }) {
   if (!threadId) throw new Error(`Codex Agent“${agentName}”缺少 thread ID`)
-  const prompt = codexInboundPrompt({ agentName, messageId, text, media })
+  const prompt = codexInboundPrompt({ agentName, messages })
   return new Promise((resolve, reject) => {
-    const images = (media || []).filter((item) => item.kind === 'image' && item.localPath)
+    const images = messages.flatMap((message) => message.media || [])
+      .filter((item) => item.kind === 'image' && item.localPath)
     const args = ['queue', '--thread', threadId, '--message', prompt]
     for (const item of images) args.push('--image', item.localPath)
     const child = spawn('codex', args, {
@@ -32,7 +36,7 @@ export function dispatchToCodex({ threadId, agentName, messageId, text, media })
     child.once('error', (error) => { clearTimeout(timer); reject(error) })
     child.once('exit', (code) => {
       clearTimeout(timer)
-      if (code === 0) resolve({ queued: true })
+      if (code === 0) resolve({ queued: true, count: messages.length })
       else reject(new Error(`codex queue 退出 ${code}：${output.trim().slice(-1000)}`))
     })
   })

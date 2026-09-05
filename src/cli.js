@@ -7,6 +7,7 @@ import { Command } from 'commander'
 
 import {
   acknowledgeAgentMessage,
+  acknowledgeAgentMessages,
   claimAgentMessage,
   enqueueMessage,
   getAgent,
@@ -233,11 +234,16 @@ inbox.command('claim').requiredOption('--agent <agent-name>').action((opts) => a
   const db = openDatabase(); try { output(claimAgentMessage(db, opts.agent)) } finally { db.close() }
 }))
 inbox.command('ack')
-  .argument('<message-id>')
+  .argument('<message-ids...>')
   .requiredOption('--agent <agent-name>')
-  .action((messageId, opts) => action(async () => {
+  .action((messageIds, opts) => action(async () => {
     const db = openDatabase()
-    try { output(acknowledgeAgentMessage(db, opts.agent, messageId)) } finally { db.close() }
+    try {
+      const result = messageIds.length === 1
+        ? acknowledgeAgentMessage(db, opts.agent, messageIds[0])
+        : acknowledgeAgentMessages(db, opts.agent, messageIds)
+      output(result)
+    } finally { db.close() }
   }))
 
 const messages = program.command('messages').description('检查通知队列与微信接受状态')
