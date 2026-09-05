@@ -11,13 +11,16 @@ export function providerPackage() {
 
 export async function loadProvider() {
   configureProviderState()
-  const [accounts, login, api, send] = await Promise.all([
+  const [accounts, login, api, send, sendMedia, mediaDownload, mediaStore] = await Promise.all([
     import('dsh-weixin-gateway/lib/weixin/accounts.js'),
     import('dsh-weixin-gateway/lib/weixin/login-qr.js'),
     import('dsh-weixin-gateway/lib/weixin/api/api.js'),
     import('dsh-weixin-gateway/lib/weixin/send.js'),
+    import('dsh-weixin-gateway/lib/weixin/send-media.js'),
+    import('dsh-weixin-gateway/lib/weixin/media/media-download.js'),
+    import('dsh-weixin-gateway/lib/weixin/media-store.js'),
   ])
-  return { accounts, login, api, send }
+  return { accounts, login, api, send, sendMedia, mediaDownload, mediaStore }
 }
 
 export async function performLogin() {
@@ -70,4 +73,35 @@ export function extractText(message) {
     if (item?.type === 1 && item.text_item?.text != null) texts.push(String(item.text_item.text))
   }
   return texts.join('\n')
+}
+
+export function extractMedia(message) {
+  const kinds = new Map([[2, 'image'], [3, 'voice'], [4, 'file'], [5, 'video']])
+  return (message.item_list || []).flatMap((item) => {
+    const kind = kinds.get(item?.type)
+    if (!kind) return []
+    const value = item[`${kind}_item`] || {}
+    return [{ kind, fileName: value.file_name || null, transcript: value.text || null }]
+  })
+}
+
+export async function downloadInboundMedia(message, provider, account) {
+  const priority = [2, 5, 4, 3]
+  const item = priority.map((type) => (message.item_list || []).find((candidate) => candidate?.type === type)).find(Boolean)
+  if (!item) return extractMedia(message)
+  const downloaded = await provider.mediaDownload.downloadMediaFromItem(item, {
+    cdnBaseUrl: account.cdnBaseUrl,
+    saveMedia: provider.mediaStore.saveMediaBuffer,
+    log: () => {},
+    errLog: (detail) => console.error(new Date().toISOString(), detail),
+    label: 'agent-channel-inbound',
+  })
+  const localPath = downloaded.decryptedPicPath || downloaded.decryptedVideoPath ||
+    downloaded.decryptedFilePath || downloaded.decryptedVoicePath || null
+  const selectedKind = new Map([[2, 'image'], [3, 'voice'], [4, 'file'], [5, 'video']]).get(item.type)
+  return extractMedia(message).map((media) => ({
+    ...media,
+    localPath: media.kind === selectedKind ? localPath : null,
+    mediaType: media.kind === selectedKind ? downloaded.fileMediaType || downloaded.voiceMediaType || null : null,
+  }))
 }

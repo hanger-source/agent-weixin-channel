@@ -3,7 +3,10 @@ import { spawn } from 'node:child_process'
 
 import {
   claimNextMessage,
+  getAgent,
   getMeta,
+  markAgentMessageDispatched,
+  markAgentMessageDispatchFailed,
   markAccepted,
   markFailed,
   markRetrying,
@@ -13,8 +16,9 @@ import {
   resetInterruptedMessages,
   setMeta,
 } from './database.js'
+import { dispatchToCodex } from './adapters/codex.js'
 import { ensureStateHome, statePaths } from './paths.js'
-import { extractText, loadProvider } from './provider.js'
+import { downloadInboundMedia, extractText, loadProvider } from './provider.js'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -48,7 +52,7 @@ export async function startDaemon() {
   const child = spawn(process.execPath, [new URL('./cli.js', import.meta.url).pathname, '_daemon-run'], {
     detached: true,
     stdio: ['ignore', log, log],
-    env: { ...process.env, WEIXIN_CHANNEL_HOME: paths.home },
+    env: { ...process.env, AGENT_WEIXIN_CHANNEL_HOME: paths.home },
   })
   let exitCode
   child.once('exit', (code) => { exitCode = code })
@@ -108,15 +112,23 @@ async function dispatchLoop({ db, account, provider, signal }) {
       if (message.accountId !== account.accountId) {
         throw new Error(`收件人属于账号 ${message.accountId}，当前 daemon 账号为 ${account.accountId}`)
       }
-      const result = await provider.send.sendMessageWeixin({
-        to: message.userId,
-        text: message.text,
-        opts: {
-          baseUrl: account.baseUrl,
-          token: account.token,
-          contextToken: message.contextToken,
-        },
-      })
+      const opts = {
+        baseUrl: account.baseUrl,
+        token: account.token,
+        contextToken: message.contextToken,
+      }
+      const result = message.mediaPath
+        ? await provider.sendMedia.sendWeixinMediaFile({
+            filePath: message.mediaPath,
+            to: message.userId,
+            text: message.renderedText,
+            opts,
+          })
+        : await provider.send.sendMessageWeixin({
+            to: message.userId,
+            text: message.renderedText,
+            opts,
+          })
       markAccepted(db, message.id, result.messageId)
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
@@ -162,14 +174,36 @@ async function pollingLoop({ db, account, provider, signal }) {
         if (!userId) continue
         const contextToken = message.context_token || null
         observeRecipient(db, { userId, accountId: account.accountId, contextToken, ownerUserId })
-        recordInbound(db, {
-          id: String(message.message_id || message.client_id || `${Date.now()}-${Math.random()}`),
+        const messageId = String(message.message_id || message.client_id || `${Date.now()}-${Math.random()}`)
+        const text = extractText(message)
+        const media = await downloadInboundMedia(message, provider, account)
+        const delivery = recordInbound(db, {
+          id: messageId,
           accountId: account.accountId,
           userId,
-          text: extractText(message),
+          text,
+          media,
           contextToken,
           messageCreatedAt: message.create_time_ms ? new Date(message.create_time_ms).toISOString() : null,
         })
+        if (delivery.routed) {
+          const agent = getAgent(db, delivery.routeKey)
+          if (agent?.adapter === 'codex') {
+            try {
+              await dispatchToCodex({
+                threadId: agent.adapterTarget,
+                agentId: agent.id,
+                messageId,
+                text: parseRoutedBody(text),
+                media,
+              })
+              markAgentMessageDispatched(db, agent.id, messageId)
+            } catch (error) {
+              markAgentMessageDispatchFailed(db, agent.id, messageId, error)
+              console.error(new Date().toISOString(), `codex dispatch failed agent=${agent.id}:`, String(error))
+            }
+          }
+        }
       }
     } catch (error) {
       if (signal.aborted) break
@@ -184,6 +218,10 @@ async function pollingLoop({ db, account, provider, signal }) {
   }
 }
 
+function parseRoutedBody(text) {
+  return String(text || '').replace(/^\s*@[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}(?:\s*[:：]\s*|\s+)?/, '').trim()
+}
+
 export async function runDaemon() {
   const releasePid = acquirePidFile()
   let db
@@ -196,13 +234,14 @@ export async function runDaemon() {
     resetInterruptedMessages(db)
     provider = await loadProvider()
     const accountId = getMeta(db, 'account_id')
-    if (!accountId) throw new Error('尚未登录；先运行 weixin-channel login')
+    if (!accountId) throw new Error('尚未登录；先运行 agent-weixin-channel login')
     const stored = provider.accounts.loadWeixinAccount(accountId)
     if (!stored?.token) throw new Error(`账号 ${accountId} 缺少登录凭据`)
     account = {
       accountId,
       token: stored.token,
       baseUrl: stored.baseUrl || provider.accounts.DEFAULT_BASE_URL,
+      cdnBaseUrl: provider.accounts.CDN_BASE_URL,
     }
     controller = new AbortController()
     stop = () => controller.abort()
@@ -214,7 +253,7 @@ export async function runDaemon() {
     setMeta(db, 'channel_error', '')
     setMeta(db, 'daemon_ready_at', new Date().toISOString())
     fs.writeFileSync(statePaths().ready, JSON.stringify({ pid: process.pid, readyAt: new Date().toISOString() }), { mode: 0o600 })
-    console.log(new Date().toISOString(), `weixin-channel daemon ready account=${accountId}`)
+    console.log(new Date().toISOString(), `agent-weixin-channel daemon ready account=${accountId}`)
     await Promise.all([
       pollingLoop({ db, account, provider, signal: controller.signal }),
       dispatchLoop({ db, account, provider, signal: controller.signal }),

@@ -1,22 +1,26 @@
 {
-  "name": "@hanger-source/weixin-channel",
+  "name": "@hanger-source/agent-weixin-channel",
   "version": "0.1.0",
-  "description": "Host-independent Weixin notification channel for agents",
+  "description": "Machine-shared Weixin channel with isolated routing and host adapters for agents",
+  "author": "hanger",
   "type": "module",
   "bin": {
-    "weixin-channel": "src/cli.js"
+    "agent-weixin-channel": "dist/cli.js"
   },
   "files": [
-    "src",
-    "scripts",
-    "skill",
+    "dist",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "test": "node --test",
-    "check": "node --check src/cli.js && node --check src/daemon.js && node --check src/database.js && node --check src/provider.js",
-    "install-skill": "node scripts/install-skill.js"
+    "check": "node --check src/cli.js && node --check src/daemon.js && node --check src/database.js && node --check src/provider.js && node --check src/adapters/codex.js",
+    "build": "node scripts/build.mjs",
+    "skill:check": "gh skill publish --dry-run .",
+    "release:prepare": "node scripts/prepare-release.mjs",
+    "release:check": "node scripts/check-release-identity.mjs",
+    "verify": "npm run check && npm test && npm run build && npm run skill:check",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "commander": "15.0.0",
@@ -26,7 +30,16 @@
     "node": ">=22.5.0"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hanger-source/agent-weixin-channel.git"
+  },
+  "homepage": "https://github.com/hanger-source/agent-weixin-channel#readme",
+  "bugs": {
+    "url": "https://github.com/hanger-source/agent-weixin-channel/issues"
+  },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }

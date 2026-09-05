@@ -1,18 +1,23 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { Command } from 'commander'
 
 import {
+  acknowledgeAgentMessage,
+  claimAgentMessage,
   enqueueMessage,
+  getAgent,
   getMessage,
   getMeta,
+  listAgentInbox,
+  listAgents,
   listMessages,
   listRecipients,
   openDatabase,
   queueCounts,
+  registerAgent,
   renameRecipient,
   setMeta,
   upsertRecipient,
@@ -23,7 +28,7 @@ import { statePaths } from './paths.js'
 
 const program = new Command()
 program
-  .name('weixin-channel')
+  .name('agent-weixin-channel')
   .description('宿主无关的 Agent 微信通知通道')
   .version('0.1.0')
   .option('--json', '只向 stdout 输出稳定 JSON')
@@ -40,7 +45,7 @@ function output(value, human) {
 function fail(error) {
   const message = error instanceof Error ? error.message : String(error)
   if (jsonMode()) process.stdout.write(`${JSON.stringify({ ok: false, error: { code: 'WEIXIN_CHANNEL_ERROR', message } })}\n`)
-  else process.stderr.write(`weixin-channel: ${message}\n`)
+  else process.stderr.write(`agent-weixin-channel: ${message}\n`)
   process.exitCode = 1
 }
 
@@ -54,6 +59,12 @@ function readMessage(opts) {
   if (opts.message != null) return String(opts.message)
   if (opts.messageFile != null) return fs.readFileSync(path.resolve(opts.messageFile), 'utf8')
   return fs.readFileSync(0, 'utf8')
+}
+
+function validateAgentId(id) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$/.test(id)) {
+    throw new Error('Agent ID 只允许字母、数字、下划线、连字符，长度 1-32')
+  }
 }
 
 program.command('doctor').description('检查依赖、登录、daemon、收件人与队列状态').action(() => action(async () => {
@@ -75,6 +86,7 @@ program.command('doctor').description('检查依赖、登录、daemon、收件�
       channelHealth,
       channelError,
       recipients: recipients.length,
+      agents: listAgents(db).length,
       readyRecipients: recipients.filter((recipient) => recipient.ready).length,
       queue: queueCounts(db),
       ready: Boolean(
@@ -127,35 +139,93 @@ recipients.command('alias')
     const db = openDatabase(); try { output(renameRecipient(db, userId, alias)) } finally { db.close() }
   }))
 
+const agents = program.command('agents').description('管理共享通道中的隔离 Agent 身份')
+agents.command('register')
+  .argument('<agent-id>')
+  .requiredOption('--name <display-name>', '微信消息中显示的名称')
+  .option('--codex-thread <thread-id>', '收到 @agent-id 时立即排入这个 Codex task')
+  .action((agentId, opts) => action(async () => {
+    validateAgentId(agentId)
+    const displayName = opts.name.trim()
+    if (!displayName || [...displayName].length > 24) throw new Error('显示名称长度必须为 1-24 个字符')
+    const adapter = opts.codexThread ? 'codex' : 'mailbox'
+    const adapterTarget = opts.codexThread || null
+    const db = openDatabase()
+    try { output(registerAgent(db, { id: agentId, displayName, adapter, adapterTarget })) } finally { db.close() }
+  }))
+agents.command('list').action(() => action(async () => {
+  const db = openDatabase(); try { output(listAgents(db)) } finally { db.close() }
+}))
+agents.command('get').argument('<agent-id>').action((agentId) => action(async () => {
+  const db = openDatabase()
+  try {
+    const agent = getAgent(db, agentId)
+    if (!agent) throw new Error(`未知 Agent ${agentId}`)
+    output(agent)
+  } finally { db.close() }
+}))
+
 program.command('send')
   .description('把一条通知提交到 durable outbox')
   .option('--to <alias>', '收件人别名', 'hang')
+  .requiredOption('--from <agent-id>', '已注册的发送 Agent ID')
   .option('--message <text>', '消息文本')
   .option('--message-file <path>', '从文件读取消息')
   .option('--stdin', '从 stdin 读取消息')
-  .option('--source <name>', '发送 Agent 或任务名')
+  .option('--file <path>', '发送图片、视频或普通文件')
+  .option('--caption <text>', '媒体消息说明')
   .option('--dedupe-key <key>', '幂等键；重复提交返回原消息')
   .option('--dry-run', '只解析并验证，不写入队列')
   .action((opts) => action(async () => {
-    const text = readMessage(opts).trim()
-    if (!text) throw new Error('消息不能为空')
+    validateAgentId(opts.from)
+    const hasTextSource = opts.message != null || opts.messageFile != null || opts.stdin === true
+    if (opts.file && hasTextSource) throw new Error('媒体消息使用 --file 和可选 --caption，不要同时传文本来源')
+    if (!opts.file && opts.caption != null) throw new Error('--caption 只用于 --file')
+    const text = opts.file ? String(opts.caption || '').trim() : readMessage(opts).trim()
+    if (!opts.file && !text) throw new Error('消息不能为空')
+    const mediaPath = opts.file ? path.resolve(opts.file) : null
+    if (mediaPath && !fs.statSync(mediaPath, { throwIfNoEntry: false })?.isFile()) {
+      throw new Error(`媒体文件不存在或不是普通文件：${mediaPath}`)
+    }
     const db = openDatabase()
     try {
       const recipient = listRecipients(db).find((item) => item.alias === opts.to)
       if (!recipient) throw new Error(`未知收件人别名 ${opts.to}`)
       if (!recipient.ready) throw new Error(`收件人 ${opts.to} 尚未建立可发送会话`)
       if (opts.dryRun) {
-        output({ dryRun: true, recipient: opts.to, source: opts.source || null, text })
+        if (!getAgent(db, opts.from)) throw new Error(`未知 Agent ${opts.from}`)
+        output({ dryRun: true, recipient: opts.to, agentId: opts.from, text, mediaPath })
         return
       }
       const result = enqueueMessage(db, {
         recipientAlias: opts.to,
+        agentId: opts.from,
         text,
-        source: opts.source,
+        mediaPath,
         dedupeKey: opts.dedupeKey,
       })
       output(result, `${result.status}: ${result.id}${result.deduplicated ? ' (deduplicated)' : ''}`)
     } finally { db.close() }
+  }))
+
+const inbox = program.command('inbox').description('读取按 @agent-id 路由的隔离收件箱')
+inbox.command('list')
+  .requiredOption('--agent <agent-id>')
+  .option('--status <status>', 'unread、claimed、acknowledged、dispatched 或 dispatch_failed')
+  .option('--limit <number>', '最多返回条数', '20')
+  .action((opts) => action(async () => {
+    const db = openDatabase()
+    try { output(listAgentInbox(db, opts.agent, { status: opts.status, limit: opts.limit })) } finally { db.close() }
+  }))
+inbox.command('claim').requiredOption('--agent <agent-id>').action((opts) => action(async () => {
+  const db = openDatabase(); try { output(claimAgentMessage(db, opts.agent)) } finally { db.close() }
+}))
+inbox.command('ack')
+  .argument('<message-id>')
+  .requiredOption('--agent <agent-id>')
+  .action((messageId, opts) => action(async () => {
+    const db = openDatabase()
+    try { output(acknowledgeAgentMessage(db, opts.agent, messageId)) } finally { db.close() }
   }))
 
 const messages = program.command('messages').description('检查通知队列与微信接受状态')
@@ -169,18 +239,6 @@ messages.command('get').argument('<message-id>').action((id) => action(async () 
     if (!message) throw new Error(`没有消息 ${id}`)
     output(message)
   } finally { db.close() }
-}))
-
-const skill = program.command('skill').description('安装或检查共享 Agent Skill')
-skill.command('install').action(() => action(async () => {
-  const script = new URL('../scripts/install-skill.js', import.meta.url)
-  const { installSkill } = await import(script.href)
-  const target = installSkill()
-  output({ installed: true, path: target }, `Skill 已安装到 ${target}`)
-}))
-skill.command('status').action(() => action(async () => {
-  const target = path.join(os.homedir(), '.agents', 'skills', 'weixin-channel', 'SKILL.md')
-  output({ installed: fs.existsSync(target), path: target })
 }))
 
 program.command('_daemon-run', { hidden: true }).action(() => action(runDaemon))

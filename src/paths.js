@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 export function stateHome() {
-  return process.env.WEIXIN_CHANNEL_HOME?.trim() || path.join(os.homedir(), '.weixin-channel')
+  return process.env.AGENT_WEIXIN_CHANNEL_HOME?.trim() || path.join(os.homedir(), '.agent-weixin-channel')
 }
 
 export function statePaths() {
