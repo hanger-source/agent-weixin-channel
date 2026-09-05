@@ -1,20 +1,20 @@
 import { spawn } from 'node:child_process'
 
-export function codexInboundPrompt({ agentId, messageId, text, media }) {
+export function codexInboundPrompt({ agentName, messageId, text, media }) {
   const mediaSummary = media?.length
     ? `\n附件：${media.map((item) => `${item.kind}${item.localPath ? `=${item.localPath}` : ''}`).join('；')}`
     : ''
   return [
-    `$agent-weixin-channel Hang 通过微信向 @${agentId} 发送了一条消息。`,
+    `$agent-weixin-channel Hang 通过微信向 @${agentName} 发送了一条消息。`,
     `通道消息 ID：${messageId}`,
     `消息正文：${text || '（无文本）'}${mediaSummary}`,
-    `请把它作为 Hang 的正常用户输入处理。需要微信回复时，使用 agent-weixin-channel send --from ${agentId}；不要只在 Codex 界面回复。`,
+    `请把它作为 Hang 的正常用户输入处理。需要微信回复时，使用 agent-weixin-channel send --from ${agentName}；不要只在 Codex 界面回复。`,
   ].join('\n')
 }
 
-export function dispatchToCodex({ threadId, agentId, messageId, text, media }) {
-  if (!threadId) throw new Error(`Codex Agent ${agentId} 缺少 thread ID`)
-  const prompt = codexInboundPrompt({ agentId, messageId, text, media })
+export function dispatchToCodex({ threadId, agentName, messageId, text, media }) {
+  if (!threadId) throw new Error(`Codex Agent“${agentName}”缺少 thread ID`)
+  const prompt = codexInboundPrompt({ agentName, messageId, text, media })
   return new Promise((resolve, reject) => {
     const images = (media || []).filter((item) => item.kind === 'image' && item.localPath)
     const args = ['queue', '--thread', threadId, '--message', prompt]

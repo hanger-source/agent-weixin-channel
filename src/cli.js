@@ -20,7 +20,10 @@ import {
   registerAgent,
   renameRecipient,
   setMeta,
+  updateAgent,
   upsertRecipient,
+  validateAgentDescription,
+  validateAgentName,
 } from './database.js'
 import { daemonStatus, runDaemon, startDaemon, stopDaemon } from './daemon.js'
 import { performLogin, providerPackage } from './provider.js'
@@ -59,12 +62,6 @@ function readMessage(opts) {
   if (opts.message != null) return String(opts.message)
   if (opts.messageFile != null) return fs.readFileSync(path.resolve(opts.messageFile), 'utf8')
   return fs.readFileSync(0, 'utf8')
-}
-
-function validateAgentId(id) {
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$/.test(id)) {
-    throw new Error('Agent ID 只允许字母、数字、下划线、连字符，长度 1-32')
-  }
 }
 
 program.command('doctor').description('检查依赖、登录、daemon、收件人与队列状态').action(() => action(async () => {
@@ -141,34 +138,43 @@ recipients.command('alias')
 
 const agents = program.command('agents').description('管理共享通道中的隔离 Agent 身份')
 agents.command('register')
-  .argument('<agent-id>')
-  .requiredOption('--name <display-name>', '微信消息中显示的名称')
-  .option('--codex-thread <thread-id>', '收到 @agent-id 时立即排入这个 Codex task')
-  .action((agentId, opts) => action(async () => {
-    validateAgentId(agentId)
-    const displayName = opts.name.trim()
-    if (!displayName || [...displayName].length > 24) throw new Error('显示名称长度必须为 1-24 个字符')
+  .argument('<agent-name>')
+  .requiredOption('--description <text>', '每条微信消息中显示的当前任务描述')
+  .option('--codex-thread <thread-id>', '收到 @名称 时立即排入这个 Codex task')
+  .action((agentName, opts) => action(async () => {
+    validateAgentName(agentName)
+    const description = validateAgentDescription(opts.description)
     const adapter = opts.codexThread ? 'codex' : 'mailbox'
     const adapterTarget = opts.codexThread || null
     const db = openDatabase()
-    try { output(registerAgent(db, { id: agentId, displayName, adapter, adapterTarget })) } finally { db.close() }
+    try { output(registerAgent(db, { name: agentName, description, adapter, adapterTarget })) } finally { db.close() }
   }))
 agents.command('list').action(() => action(async () => {
   const db = openDatabase(); try { output(listAgents(db)) } finally { db.close() }
 }))
-agents.command('get').argument('<agent-id>').action((agentId) => action(async () => {
+agents.command('get').argument('<agent-name>').action((agentName) => action(async () => {
   const db = openDatabase()
   try {
-    const agent = getAgent(db, agentId)
-    if (!agent) throw new Error(`未知 Agent ${agentId}`)
+    const agent = getAgent(db, agentName)
+    if (!agent) throw new Error(`未知 Agent“${agentName}”`)
     output(agent)
   } finally { db.close() }
 }))
+agents.command('update')
+  .argument('<current-name>')
+  .requiredOption('--name <agent-name>', '新的两字中文名称')
+  .requiredOption('--description <text>', '新的当前任务描述')
+  .action((currentName, opts) => action(async () => {
+    validateAgentName(opts.name)
+    const description = validateAgentDescription(opts.description)
+    const db = openDatabase()
+    try { output(updateAgent(db, currentName, { name: opts.name, description })) } finally { db.close() }
+  }))
 
 program.command('send')
   .description('把一条通知提交到 durable outbox')
   .option('--to <alias>', '收件人别名', 'hang')
-  .requiredOption('--from <agent-id>', '已注册的发送 Agent ID')
+  .requiredOption('--from <agent-name>', '已注册的两字 Agent 名称')
   .option('--message <text>', '消息文本')
   .option('--message-file <path>', '从文件读取消息')
   .option('--stdin', '从 stdin 读取消息')
@@ -177,7 +183,7 @@ program.command('send')
   .option('--dedupe-key <key>', '幂等键；重复提交返回原消息')
   .option('--dry-run', '只解析并验证，不写入队列')
   .action((opts) => action(async () => {
-    validateAgentId(opts.from)
+    validateAgentName(opts.from)
     const hasTextSource = opts.message != null || opts.messageFile != null || opts.stdin === true
     if (opts.file && hasTextSource) throw new Error('媒体消息使用 --file 和可选 --caption，不要同时传文本来源')
     if (!opts.file && opts.caption != null) throw new Error('--caption 只用于 --file')
@@ -194,12 +200,12 @@ program.command('send')
       if (!recipient.ready) throw new Error(`收件人 ${opts.to} 尚未建立可发送会话`)
       if (opts.dryRun) {
         if (!getAgent(db, opts.from)) throw new Error(`未知 Agent ${opts.from}`)
-        output({ dryRun: true, recipient: opts.to, agentId: opts.from, text, mediaPath })
+        output({ dryRun: true, recipient: opts.to, agentName: opts.from, text, mediaPath })
         return
       }
       const result = enqueueMessage(db, {
         recipientAlias: opts.to,
-        agentId: opts.from,
+        agentName: opts.from,
         text,
         mediaPath,
         dedupeKey: opts.dedupeKey,
@@ -208,21 +214,21 @@ program.command('send')
     } finally { db.close() }
   }))
 
-const inbox = program.command('inbox').description('读取按 @agent-id 路由的隔离收件箱')
+const inbox = program.command('inbox').description('读取按 @两字名称 路由的隔离收件箱')
 inbox.command('list')
-  .requiredOption('--agent <agent-id>')
+  .requiredOption('--agent <agent-name>')
   .option('--status <status>', 'unread、claimed、acknowledged、dispatched 或 dispatch_failed')
   .option('--limit <number>', '最多返回条数', '20')
   .action((opts) => action(async () => {
     const db = openDatabase()
     try { output(listAgentInbox(db, opts.agent, { status: opts.status, limit: opts.limit })) } finally { db.close() }
   }))
-inbox.command('claim').requiredOption('--agent <agent-id>').action((opts) => action(async () => {
+inbox.command('claim').requiredOption('--agent <agent-name>').action((opts) => action(async () => {
   const db = openDatabase(); try { output(claimAgentMessage(db, opts.agent)) } finally { db.close() }
 }))
 inbox.command('ack')
   .argument('<message-id>')
-  .requiredOption('--agent <agent-id>')
+  .requiredOption('--agent <agent-name>')
   .action((messageId, opts) => action(async () => {
     const db = openDatabase()
     try { output(acknowledgeAgentMessage(db, opts.agent, messageId)) } finally { db.close() }

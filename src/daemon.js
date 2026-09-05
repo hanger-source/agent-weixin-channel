@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 
 import {
   claimNextMessage,
-  getAgent,
+  getAgentById,
   getMeta,
   markAgentMessageDispatched,
   markAgentMessageDispatchFailed,
@@ -187,20 +187,20 @@ async function pollingLoop({ db, account, provider, signal }) {
           messageCreatedAt: message.create_time_ms ? new Date(message.create_time_ms).toISOString() : null,
         })
         if (delivery.routed) {
-          const agent = getAgent(db, delivery.routeKey)
+          const agent = getAgentById(db, delivery.agentId)
           if (agent?.adapter === 'codex') {
             try {
               await dispatchToCodex({
                 threadId: agent.adapterTarget,
-                agentId: agent.id,
+                agentName: agent.name,
                 messageId,
-                text: parseRoutedBody(text),
+                text: delivery.body,
                 media,
               })
               markAgentMessageDispatched(db, agent.id, messageId)
             } catch (error) {
               markAgentMessageDispatchFailed(db, agent.id, messageId, error)
-              console.error(new Date().toISOString(), `codex dispatch failed agent=${agent.id}:`, String(error))
+              console.error(new Date().toISOString(), `codex dispatch failed agent=${agent.name}:`, String(error))
             }
           }
         }
@@ -216,10 +216,6 @@ async function pollingLoop({ db, account, provider, signal }) {
       await sleep(detail.includes('-14') ? 60_000 : 2000)
     }
   }
-}
-
-function parseRoutedBody(text) {
-  return String(text || '').replace(/^\s*@[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}(?:\s*[:：]\s*|\s+)?/, '').trim()
 }
 
 export async function runDaemon() {

@@ -30,11 +30,11 @@ agent-weixin-channel login
 ```bash
 agent-weixin-channel --json doctor
 agent-weixin-channel --json recipients list
-agent-weixin-channel --json agents register release-agent --name "发布 Agent"
-agent-weixin-channel --json send --to hang --from release-agent --message "任务已经完成"
-agent-weixin-channel --json send --to hang --from release-agent --file /absolute/path/report.pdf --caption "验收报告"
+agent-weixin-channel --json agents register 悟空 --description "发布当前版本"
+agent-weixin-channel --json send --to hang --from 悟空 --message "任务已经完成"
+agent-weixin-channel --json send --to hang --from 悟空 --file /absolute/path/report.pdf --caption "验收报告"
 agent-weixin-channel --json messages get <message-id>
-agent-weixin-channel --json inbox claim --agent release-agent
+agent-weixin-channel --json inbox claim --agent 悟空
 agent-weixin-channel daemon status
 ```
 
@@ -42,25 +42,33 @@ agent-weixin-channel daemon status
 
 ## Agent 路由
 
-一台机器只运行一个通道 daemon。每个 Agent 自己选择一个稳定 ID，并注册一个显示名。出站文本会渲染成 `【显示名】正文`，但数据库里仍分别保存 Agent ID、显示名和正文。
+一台机器只运行一个通道 daemon。每个 Agent 自己选择一个机器内唯一、恰好两个汉字的小说人物名，并声明当前任务描述。这个名称同时用于微信路由与出站署名；内部 UUID 只负责数据库关联，不暴露给 Hang，也不作为 CLI 参数。
+
+出站文本固定渲染为：
+
+```text
+【悟空】
+发布当前版本
+任务已经完成
+```
 
 Codex task 可以在注册时绑定自己的 thread。微信消息到达后，daemon 会调用本机 Codex App Server 的队列入口，立即把消息作为下一条用户输入送入该 task：
 
 ```bash
-agent-weixin-channel --json agents register release-agent \
-  --name "发布 Agent" \
+agent-weixin-channel --json agents register 悟空 \
+  --description "发布当前版本" \
   --codex-thread "$CODEX_THREAD_ID"
 ```
 
-没有宿主 adapter 的 Agent 使用默认 mailbox，并通过 `inbox claim/ack` 消费。共享的是微信连接和数据库；隔离的是 Agent ID、宿主目标和 inbox。
+没有宿主 adapter 的 Agent 使用默认 mailbox，并通过 `inbox claim/ack` 消费。共享的是微信连接和数据库；隔离的是 Agent 名称、宿主目标和 inbox。
 
 Hang 回复时使用：
 
 ```text
-@release-agent 可以发布
+@悟空 可以发布
 ```
 
-该消息只进入 `release-agent` 的 inbox。不带路由或指向未知 ID 的消息会保留在通道记录中，但不会猜测投递对象。`inbox claim` 以原子方式领取一条消息，处理完后用 `inbox ack` 确认。
+该消息只进入“悟空”的 inbox。不带路由或指向未知名称的消息会保留在通道记录中，但不会猜测投递对象。`inbox claim` 以原子方式领取一条消息，处理完后用 `inbox ack` 确认。
 
 `doctor.data.ready=true` 要求 daemon 已 ready、最近一次长轮询健康，并且至少有一个收件人取得了 `context_token`；进程存活本身不等于微信通道可用。
 
@@ -90,7 +98,7 @@ Hang 回复时使用：
 
 ## 状态所有权
 
-默认状态目录为 `~/.agent-weixin-channel`，可用 `AGENT_WEIXIN_CHANNEL_HOME` 覆盖。SQLite 使用 WAL，允许多个 Agent 并发提交，并以 Agent ID 隔离 inbox；只有 daemon 能读取微信凭据并执行协议调用。这是同一 macOS 用户内的逻辑隔离，不是对本机恶意进程的安全沙箱。
+默认状态目录为 `~/.agent-weixin-channel`，可用 `AGENT_WEIXIN_CHANNEL_HOME` 覆盖。SQLite 使用 WAL，允许多个 Agent 并发提交，并以 Agent 名称隔离 inbox；只有 daemon 能读取微信凭据并执行协议调用。这是同一 macOS 用户内的逻辑隔离，不是对本机恶意进程的安全沙箱。
 
 协议适配精确依赖 `dsh-weixin-gateway@0.5.13`，把其私有模块路径封装在 `src/provider.js`，其余代码不依赖该包的内部布局。
 
