@@ -1,0 +1,32 @@
+{
+  "name": "@hanger-source/weixin-channel",
+  "version": "0.1.0",
+  "description": "Host-independent Weixin notification channel for agents",
+  "type": "module",
+  "bin": {
+    "weixin-channel": "src/cli.js"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "skill",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/cli.js && node --check src/daemon.js && node --check src/database.js && node --check src/provider.js",
+    "install-skill": "node scripts/install-skill.js"
+  },
+  "dependencies": {
+    "commander": "15.0.0",
+    "dsh-weixin-gateway": "0.5.13"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
