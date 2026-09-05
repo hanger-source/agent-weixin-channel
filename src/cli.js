@@ -1,6 +1,7 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { Command } from 'commander'
 
@@ -29,11 +30,13 @@ import { daemonStatus, runDaemon, startDaemon, stopDaemon } from './daemon.js'
 import { performLogin, providerPackage } from './provider.js'
 import { statePaths } from './paths.js'
 
+const require = createRequire(import.meta.url)
+const manifest = require('../package.json')
 const program = new Command()
 program
   .name('agent-weixin-channel')
   .description('宿主无关的 Agent 微信通知通道')
-  .version('0.1.0')
+  .version(manifest.version)
   .option('--json', '只向 stdout 输出稳定 JSON')
 
 function jsonMode() {
