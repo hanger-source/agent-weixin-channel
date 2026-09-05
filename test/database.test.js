@@ -175,6 +175,7 @@ test('host adapter delivery has an explicit dispatched state', async () => {
     const [message] = database.listAgentInbox(db, '悟空', { status: 'unread' })
     assert.equal(message.text, '继续处理')
     assert.equal(message.deliveryStatus, 'dispatched')
+    assert.equal(database.acknowledgeAgentMessage(db, '悟空', 'm2').status, 'acknowledged')
   } finally {
     db.close()
     fs.rmSync(home, { recursive: true, force: true })

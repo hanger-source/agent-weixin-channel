@@ -334,9 +334,10 @@ export function acknowledgeAgentMessage(db, agentName, messageId) {
   if (!agent) throw new Error(`未知 Agent“${agentName}”`)
   const changed = db.prepare(`
     UPDATE agent_inbox SET status = 'acknowledged', acknowledged_at = ?
-    WHERE message_id = ? AND agent_id = ? AND status = 'claimed'
+    WHERE message_id = ? AND agent_id = ?
+      AND status IN ('unread', 'claimed', 'dispatched', 'dispatch_failed')
   `).run(now(), messageId, agent.id)
-  if (changed.changes !== 1) throw new Error(`消息 ${messageId} 不属于“${agentName}”的 claimed inbox`)
+  if (changed.changes !== 1) throw new Error(`消息 ${messageId} 不属于“${agentName}”的未确认 inbox`)
   return { id: messageId, agentName, status: 'acknowledged' }
 }
 

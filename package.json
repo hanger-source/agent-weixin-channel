@@ -1,6 +1,6 @@
 {
   "name": "@hanger-source/agent-weixin-channel",
-  "version": "0.2.0-alpha.2",
+  "version": "0.2.0-alpha.3",
   "description": "Machine-shared Weixin channel with isolated routing and host adapters for agents",
   "author": "hanger",
   "type": "module",
